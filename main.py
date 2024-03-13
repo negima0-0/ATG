@@ -2,6 +2,11 @@ import csv
 import json
 from netmiko import ConnectHandler
 import configparser
+from openpyxl import Workbook, load_workbook
+from openpyxl.utils.exceptions import WorkbookAlreadySaved
+from openpyxl.utils import get_column_letter
+import os
+from datetime import datetime
 
 # ユーザ名とパスワードを取得する関数
 def get_credentials():
@@ -28,12 +33,60 @@ with open('hosts.csv', 'r') as csvfile:
         elif 'ip_address' in row:
             hosts.append((None, row['ip_address']))
 
-proxy_ssh_info = {
-    'device_type': 'juniper_junos',
-    'ip': '10.10.0.51',
-    'username': 'negima',
-    'password': 'raindrop3',
-}
+# ホストごとにデータをエクセルに書き込む関数
+def write_to_excel(host, interface_info):
+    try:
+        wb = load_workbook('output.xlsx')
+    except FileNotFoundError:
+        wb = Workbook()
+
+    # デフォルトで作成されるSheetを削除
+    default_sheet = wb['Sheet']
+    wb.remove(default_sheet)
+
+    try:
+        ws = wb[host]
+    except KeyError:
+        ws = wb.create_sheet(title=host)
+        headers = ["Timestamp", "Interface", "Input Multicasts", "Output Multicasts", "Input Broadcasts", "Output Broadcasts", "Input Errors", "Input Drops", "Framing Drops", "Input Runts", "Input Discards", "Input L3 Incompletes", "Input L2 Channel Errors", "Input L2 Mismatch Timeouts", "Input FIFO Errors", "Input Resource Errors"]
+        ws.append(headers)
+
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for interface_data in interface_info:
+        ws.append([timestamp] + list(interface_data))
+
+    try:
+        wb.save('output.xlsx')
+    except:
+        print("エクセルファイルが開かれているか、その他要因によって追記できません。")
+
+# JSONデータからインターフェースごとの情報を取り出す関数
+def extract_interface_info(data):
+    interface_info = []
+    for interface in data['interface-information'][0]['physical-interface']:
+        interface_name = interface.get('name', [{}])[0].get('data', 'No Data')
+
+        # 対象のインターフェースに絞る
+        if interface_name.startswith(('ae', 'ge', 'xe', 'irb', 'reth')):
+            input_multicasts = interface.get('ethernet-mac-statistics', [{}])[0].get('input-multicasts', [{}])[0].get('data', 'No Data')
+            output_multicasts = interface.get('ethernet-mac-statistics', [{}])[0].get('output-multicasts', [{}])[0].get('data', 'No Data')
+            input_broadcasts = interface.get('ethernet-mac-statistics', [{}])[0].get('input-broadcasts', [{}])[0].get('data', 'No Data')
+            output_broadcasts = interface.get('ethernet-mac-statistics', [{}])[0].get('output-broadcasts', [{}])[0].get('data', 'No Data')
+            input_errors = interface.get('input-error-list', [{}])[0].get('input-errors', [{}])[0].get('data', 'No Data')
+            input_drops = interface.get('input-error-list', [{}])[0].get('input-drops', [{}])[0].get('data', 'No Data')
+            framing_drops = interface.get('input-error-list', [{}])[0].get('framing-errors', [{}])[0].get('data', 'No Data')
+            input_runts = interface.get('input-error-list', [{}])[0].get('input-runts', [{}])[0].get('data', 'No Data')
+            input_discards = interface.get('input-error-list', [{}])[0].get('input-discards', [{}])[0].get('data', 'No Data')
+            input_l3_incompletes = interface.get('input-error-list', [{}])[0].get('input-l3-incompletes', [{}])[0].get('data', 'No Data')
+            input_l2_channel_errors = interface.get('input-error-list', [{}])[0].get('input-l2-channel-errors', [{}])[0].get('data', 'No Data')
+            input_l2_mismatch_timeouts = interface.get('input-error-list', [{}])[0].get('input-l2-mismatch-timeouts', [{}])[0].get('data', 'No Data')
+            input_fifo_errors = interface.get('input-error-list', [{}])[0].get('input-fifo-errors', [{}])[0].get('data', 'No Data')
+            input_resource_errors = interface.get('input-error-list', [{}])[0].get('input-resource-errors', [{}])[0].get('data', 'No Data')
+            interface_info.append((interface_name, input_multicasts, output_multicasts, input_broadcasts, output_broadcasts, input_errors, input_drops, framing_drops, input_runts, input_discards, input_l3_incompletes, input_l2_channel_errors, input_l2_mismatch_timeouts, input_fifo_errors, input_resource_errors))
+    return interface_info
+
+
 
 # ホストへの接続
 for hostname, ip_address in hosts:
@@ -48,13 +101,13 @@ for hostname, ip_address in hosts:
             port=22,  # SSHポート（デフォルトは22）
             global_delay_factor=2,  # コマンド実行後のディレイ係数
             timeout=30,  # レスポンスまでのタイムアウトを30秒に設定(デフォルトは5秒)
-            session_log=f"session_logs/{hostname or ip_address}.log",
-            proxy=proxy_ssh_info,
+            session_log=f"session_logs/{hostname or ip_address}.log"
         ) as ssh:
             # コマンドを実行してJSONデータを取得
-            json_output = ssh.send_command('show interfaces extensive ge-0/0/0 | display json | no-more')
+            json_output = ssh.send_command('show interfaces extensive | display json | no-more')
 
     except Exception as e:
+        print(e)
         # ホスト名での接続が失敗した場合、IPアドレスで再接続を試みる
         print(f"ホスト名での接続に失敗しました。IPアドレス {ip_address} を使用して再接続を試みます...")
         try:
@@ -67,11 +120,7 @@ for hostname, ip_address in hosts:
                 port=22,  # SSHポート（デフォルトは22）
                 global_delay_factor=2,  # コマンド実行後のディレイ係数
                 timeout = 30,  # レスポンスまでのタイムアウトを30秒に設定(デフォルトは5秒)
-                proxy_host = '10.10.0.51',
-                proxy_port = 22,
-                proxy_username = username,
-                proxy_password = password,
-                session_log=f"session_logs/{hostname or ip_address}.log",
+                session_log=f"session_logs/{hostname or ip_address}.log"
             ) as ssh:
                 # コマンドを実行してJSONデータを取得
                 json_output = ssh.send_command('show interfaces extensive | display json | no-more', read_timeout=90) #タイムアウト90秒
@@ -80,44 +129,33 @@ for hostname, ip_address in hosts:
             print(f"ホスト {hostname or ip_address} への接続中にエラーが発生しました:", e)
             continue
 
-    # JSONデータからマルチキャストパケットとブロードキャストパケットの値を取り出す関数
-    def extract_packet_counts(json_data):
-        interface_data = []
-        #  interface = json.loads(json_output)['configuration']['interfaces']['interface']
-        data = json.loads(json_data)
-        input_multicasts = data['interface-information'][0]['physical-interface'][0]['ethernet-mac-statistics'][0]['input-multicasts'][0]['data']
-        output_multicasts = data['interface-information'][0]['physical-interface'][0]['ethernet-mac-statistics'][0]['output-multicasts'][0]['data']
-        input_broadcasts = data['interface-information'][0]['physical-interface'][0]['ethernet-mac-statistics'][0]['input-broadcasts'][0]['data']
-        output_broadcasts = data['interface-information'][0]['physical-interface'][0]['ethernet-mac-statistics'][0]['output-broadcasts'][0]['data']
-        input_errors = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['input-errors'][0]['data']
-        input_drops = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['input-drops'][0]['data']
-        framing_drops = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['framing-errors'][0]['data']
-        input_runts = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['input-runts'][0]['data']
-        input_discards = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['input-discards'][0]['data']
-        input_l3_incompletes = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['input-l3-incompletes'][0]['data']
-        input_l2_channel_errors = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['input-l2-channel-errors'][0]['data']
-        input_l2_mismatch_timeouts = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['input-l2-mismatch-timeouts'][0]['data']
-        input_fifo_errors = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['input-fifo-errors'][0]['data']
-        input_resource_errors = data['interface-information'][0]['physical-interface'][0]['input-error-list'][0]['input-resource-errors'][0]['data']
-        return input_multicasts, output_multicasts, input_broadcasts, output_broadcasts, input_errors, input_drops, framing_drops, input_runts, input_discards, input_l3_incompletes, input_l2_channel_errors, input_l2_mismatch_timeouts, input_fifo_errors, input_resource_errors
+    # JSONデータからインターフェースごとの情報を取得
+    interface_info = extract_interface_info(json.loads(json_output))
 
-    # JSONデータから値を取得
-    input_multicasts, output_multicasts, input_broadcasts, output_broadcasts, input_errors, input_drops, framing_drops, input_runts, input_discards, input_l3_incompletes, input_l2_channel_errors, input_l2_mismatch_timeouts, input_fifo_errors, input_resource_errors = extract_packet_counts(json_output)
+    # エクセルにデータを書き込む
+    #  create_excel_file_if_not_exists()
+    write_to_excel(hostname or ip_address, interface_info)
+
+    # 結果の出力
+    print(f"ホスト: {hostname or ip_address} のデータをエクセルに書き込みました。")
 
     # 結果の出力
     print(f"ホスト: {hostname or ip_address}")
-    print("マルチキャストパケット（入力）:", input_multicasts)
-    print("マルチキャストパケット（出力）:", output_multicasts)
-    print("ブロードキャストパケット（入力）:", input_broadcasts)
-    print("ブロードキャストパケット（出力）:", output_broadcasts)
-    print(input_errors)
-    print(input_drops)
-    print(framing_drops)
-    print(input_runts)
-    print(input_discards)
-    print(input_l3_incompletes)
-    print(input_l2_channel_errors)
-    print(input_l2_mismatch_timeouts)
-    print(input_fifo_errors)
-    print(input_resource_errors)
-    print('-' * 50)
+    for interface in interface_info:
+        interface_name, input_multicasts, output_multicasts, input_broadcasts, output_broadcasts, input_errors, input_drops, framing_drops, input_runts, input_discards, input_l3_incompletes, input_l2_channel_errors, input_l2_mismatch_timeouts, input_fifo_errors, input_resource_errors = interface
+        print(f"インターフェース名: {interface_name}")
+        print("マルチキャストパケット（入力）:", input_multicasts)
+        print("マルチキャストパケット（出力）:", output_multicasts)
+        print("ブロードキャストパケット（入力）:", input_broadcasts)
+        print("ブロードキャストパケット（出力）:", output_broadcasts)
+        print("input errors: ", input_errors)
+        print("input drops: ", input_drops)
+        print("framing drops: ", framing_drops)
+        print("input runts: ", input_runts)
+        print("input discards: ", input_discards)
+        print("input L3 incompletes: ", input_l3_incompletes)
+        print("input L2 channel errors: ", input_l2_channel_errors)
+        print("input L2 mismatch timeouts: ", input_l2_mismatch_timeouts)
+        print("input fifo errors: ", input_fifo_errors)
+        print("input resource errors: ", input_resource_errors)
+        print('-' * 50)
