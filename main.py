@@ -1,14 +1,15 @@
 import csv
 import json
-from netmiko import ConnectHandler
 import configparser
+import os
+from datetime import datetime
+from netmiko import ConnectHandler
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import WorkbookAlreadySaved
 from openpyxl.utils import get_column_letter
-import os
-from datetime import datetime
 
-# ユーザ名とパスワードを取得する関数
+
+# config.iniからユーザ名とパスワードを取得する
 def get_credentials():
     config = configparser.ConfigParser()
     config.read('config.ini')
@@ -18,8 +19,15 @@ def get_credentials():
 
     return username, password
 
+
 # ユーザ名とパスワードを取得
 username, password = get_credentials()
+
+
+# セッションログ用のフォルダが存在しない場合作成する
+if not os.path.exists('session_logs'):
+    os.makedirs('session_logs')
+
 
 # CSVファイルからホスト名とIPアドレスの対応を読み込む
 hosts = []
@@ -33,16 +41,14 @@ with open('hosts.csv', 'r') as csvfile:
         elif 'ip_address' in row:
             hosts.append((None, row['ip_address']))
 
-# ホストごとにデータをエクセルに書き込む関数
+
+# ホストごとにデータをエクセルに書き込む
 def write_to_excel(host, interface_info):
+    print(f"{host} の情報をエクセルに書き込んでいます。")
     try:
         wb = load_workbook('output.xlsx')
     except FileNotFoundError:
         wb = Workbook()
-
-    # デフォルトで作成されるSheetを削除
-    default_sheet = wb['Sheet']
-    wb.remove(default_sheet)
 
     try:
         ws = wb[host]
@@ -58,10 +64,16 @@ def write_to_excel(host, interface_info):
 
     try:
         wb.save('output.xlsx')
+        print(f"ホスト: {hostname or ip_address} のデータをエクセルに書き込みました。")
+    except PermissionError as e:
+        print(f"エラー: {e} (output.xlsxが開かれているため追記できません)")
+        return
     except:
         print("エクセルファイルが開かれているか、その他要因によって追記できません。")
+        return
 
-# JSONデータからインターフェースごとの情報を取り出す関数
+
+# JSONデータからインターフェースごとの情報を取り出す
 def extract_interface_info(data):
     interface_info = []
     for interface in data['interface-information'][0]['physical-interface']:
@@ -69,6 +81,7 @@ def extract_interface_info(data):
 
         # 対象のインターフェースに絞る
         if interface_name.startswith(('ae', 'ge', 'xe', 'irb', 'reth')):
+            tail_drop_packets = interface.get('ingress-queue-counters', [{}])[0].get('input-multicasts', [{}])[0].get('data', 'No Data')
             input_multicasts = interface.get('ethernet-mac-statistics', [{}])[0].get('input-multicasts', [{}])[0].get('data', 'No Data')
             output_multicasts = interface.get('ethernet-mac-statistics', [{}])[0].get('output-multicasts', [{}])[0].get('data', 'No Data')
             input_broadcasts = interface.get('ethernet-mac-statistics', [{}])[0].get('input-broadcasts', [{}])[0].get('data', 'No Data')
@@ -87,58 +100,59 @@ def extract_interface_info(data):
     return interface_info
 
 
-
 # ホストへの接続
-for hostname, ip_address in hosts:
-    try:
-        # ホストへのSSH接続（ホスト名での接続）
-        with ConnectHandler(
-            device_type='juniper_junos',
-            ip=ip_address,
-            hostname=hostname,
-            username=username,
-            password=password,
-            port=22,  # SSHポート（デフォルトは22）
-            global_delay_factor=2,  # コマンド実行後のディレイ係数
-            timeout=30,  # レスポンスまでのタイムアウトを30秒に設定(デフォルトは5秒)
-            session_log=f"session_logs/{hostname or ip_address}.log"
-        ) as ssh:
-            # コマンドを実行してJSONデータを取得
-            json_output = ssh.send_command('show interfaces extensive | display json | no-more')
-
-    except Exception as e:
-        print(e)
-        # ホスト名での接続が失敗した場合、IPアドレスで再接続を試みる
-        print(f"ホスト名での接続に失敗しました。IPアドレス {ip_address} を使用して再接続を試みます...")
+def main():
+    for hostname, ip_address in hosts:
         try:
-            # ホストへのSSH接続（IPアドレスでの接続）
+            # ホストへのSSH接続（ホスト名での接続）
             with ConnectHandler(
                 device_type='juniper_junos',
                 ip=ip_address,
+                hostname=hostname,
                 username=username,
                 password=password,
                 port=22,  # SSHポート（デフォルトは22）
                 global_delay_factor=2,  # コマンド実行後のディレイ係数
-                timeout = 30,  # レスポンスまでのタイムアウトを30秒に設定(デフォルトは5秒)
+                timeout=30,  # レスポンスまでのタイムアウトを30秒に設定(デフォルトは5秒)
                 session_log=f"session_logs/{hostname or ip_address}.log"
             ) as ssh:
                 # コマンドを実行してJSONデータを取得
-                json_output = ssh.send_command('show interfaces extensive | display json | no-more', read_timeout=90) #タイムアウト90秒
+                json_output = ssh.send_command('show interfaces queue forwarding-class AF |no-more |display json')
 
         except Exception as e:
-            print(f"ホスト {hostname or ip_address} への接続中にエラーが発生しました:", e)
-            continue
+            print(e)
+            # ホスト名での接続が失敗した場合、IPアドレスで再接続を試みる
+            print(f"ホスト名での接続に失敗しました。IPアドレス {ip_address} を使用して再接続を試みます...")
+            try:
+                # ホストへのSSH接続（IPアドレスでの接続）
+                with ConnectHandler(
+                    device_type='juniper_junos',
+                    ip=ip_address,
+                    username=username,
+                    password=password,
+                    port=22,  # SSHポート（デフォルトは22）
+                    global_delay_factor=2,  # コマンド実行後のディレイ係数
+                    timeout = 30,  # レスポンスまでのタイムアウトを30秒に設定(デフォルトは5秒)
+                    session_log=f"session_logs/{hostname or ip_address}.log"
+                ) as ssh:
+                    # コマンドを実行してJSONデータを取得
+                    json_output = ssh.send_command('show interfaces queue forwarding-class AF |no-more |display json', read_timeout=90) #タイムアウト90秒
 
-    # JSONデータからインターフェースごとの情報を取得
-    interface_info = extract_interface_info(json.loads(json_output))
+            except Exception as e:
+                print(f"ホスト {hostname or ip_address} への接続中にエラーが発生しました:", e)
+                continue
 
-    # エクセルにデータを書き込む
-    #  create_excel_file_if_not_exists()
-    write_to_excel(hostname or ip_address, interface_info)
+        # JSONデータからインターフェースごとの情報を取得
+        interface_info = extract_interface_info(json.loads(json_output))
 
-    # 結果の出力
-    print(f"ホスト: {hostname or ip_address} のデータをエクセルに書き込みました。")
+        # エクセルにデータを書き込む
+        #  create_excel_file_if_not_exists()
+        write_to_excel(hostname or ip_address, interface_info)
 
+        # 結果の出力
+        # print(f"ホスト: {hostname or ip_address} のデータをエクセルに書き込みました。")
+
+'''
     # 結果の出力
     print(f"ホスト: {hostname or ip_address}")
     for interface in interface_info:
@@ -159,3 +173,7 @@ for hostname, ip_address in hosts:
         print("input fifo errors: ", input_fifo_errors)
         print("input resource errors: ", input_resource_errors)
         print('-' * 50)
+'''
+
+if __name__ == "__main__":
+    main()
